@@ -1,0 +1,411 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector, pg_trgm]
+}
+
+// ---------------------------------------------------------------------------
+// Enums — single source of truth, shared by the compatibility engine, catalog
+// filters, and seed generators (see docs/schema.md).
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+}
+
+enum ProductType {
+  CPU
+  MOTHERBOARD
+  RAM
+  GPU
+  STORAGE
+  PSU
+  CASE
+  COOLER
+  FAN
+  MONITOR
+  KEYBOARD
+  MOUSE
+  HEADSET
+  NETWORK_CARD
+  CABLE
+  THERMAL_PASTE
+}
+
+enum CpuSocket {
+  AM4
+  AM5
+  LGA1200
+  LGA1700
+  LGA1851
+}
+
+enum RamType {
+  DDR4
+  DDR5
+}
+
+enum FormFactor {
+  E_ATX
+  ATX
+  MICRO_ATX
+  MINI_ITX
+}
+
+enum PcieVersion {
+  PCIE_3_0
+  PCIE_4_0
+  PCIE_5_0
+}
+
+enum DriveInterface {
+  SATA_3
+  NVME_PCIE3_X4
+  NVME_PCIE4_X4
+  NVME_PCIE5_X4
+}
+
+enum PsuEfficiency {
+  WHITE
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+  TITANIUM
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum ChatRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+// ---------------------------------------------------------------------------
+// Users / accounts
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         UserRole @default(CUSTOMER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  addresses     Address[]
+  cart          Cart?
+  orders        Order[]
+  reviews       Review[]
+  wishlistItems Wishlist[]
+  chatSessions  ChatSession[]
+  savedBuilds   SavedBuild[]
+}
+
+model Address {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String
+  fullName   String
+  phone      String
+  line1      String
+  line2      String?
+  city       String
+  state      String
+  postalCode String
+  country    String
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Catalog taxonomy
+// ---------------------------------------------------------------------------
+
+model Category {
+  id          String     @id @default(cuid())
+  name        String
+  slug        String     @unique
+  description String?
+  imageUrl    String?
+  sortOrder   Int        @default(0)
+  parentId    String?
+  parent      Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children    Category[] @relation("CategoryHierarchy")
+  products    Product[]
+}
+
+model Brand {
+  id          String    @id @default(cuid())
+  name        String
+  slug        String    @unique
+  logoUrl     String?
+  description String?
+  products    Product[]
+}
+
+// ---------------------------------------------------------------------------
+// Products
+// ---------------------------------------------------------------------------
+
+model Product {
+  id               String      @id @default(cuid())
+  slug             String      @unique
+  sku              String      @unique
+  name             String
+  type             ProductType
+  categoryId       String
+  category         Category    @relation(fields: [categoryId], references: [id])
+  brandId          String
+  brand            Brand       @relation(fields: [brandId], references: [id])
+  description      String
+  shortDescription String
+  price            Decimal     @db.Decimal(10, 2)
+  compareAtPrice   Decimal?    @db.Decimal(10, 2)
+  stockQuantity    Int         @default(0)
+  isActive         Boolean     @default(true)
+  isFeatured       Boolean     @default(false)
+  specs            Json
+  releaseYear      Int?
+  avgRating        Decimal     @default(0) @db.Decimal(3, 2)
+  reviewCount      Int         @default(0)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  images        ProductImage[]
+  compatibility ProductCompatibility?
+  embedding     ProductEmbedding?
+  reviews       Review[]
+  wishlistedBy  Wishlist[]
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  buildItems    BuildItem[]
+
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([type])
+  @@index([price])
+  @@index([isActive])
+  @@index([name(ops: raw("gin_trgm_ops"))], map: "product_name_trgm_idx", type: Gin)
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  altText   String
+  sortOrder Int     @default(0)
+  isPrimary Boolean @default(false)
+
+  @@index([productId])
+}
+
+/// Typed fields the deterministic compatibility engine and structured search
+/// filters need across categories. Only the columns relevant to a product's
+/// `type` are populated; see docs/schema.md.
+model ProductCompatibility {
+  id        String  @id @default(cuid())
+  productId String  @unique
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  socketType               CpuSocket?
+  chipset                  String?
+  ramType                  RamType?
+  ramSpeedMhz              Int?
+  maxRamCapacityGb         Int?
+  maxRamSlots              Int?
+  formFactor               FormFactor?
+  pcieVersion              PcieVersion?
+  pcieLanes                Int?
+  tdpWatts                 Int?
+  powerDrawWatts           Int?
+  wattageCapacity          Int?
+  efficiencyRating         PsuEfficiency?
+  coolerSupportedSockets   CpuSocket[]
+  driveInterface           DriveInterface?
+  caseMaxGpuLengthMm       Int?
+  caseMaxCoolerHeightMm    Int?
+  caseSupportedFormFactors FormFactor[]
+  gpuLengthMm              Int?
+}
+
+/// Vector column populated/queried via raw SQL only — Prisma Client cannot
+/// read or write `Unsupported` fields directly. See src/server/ai/embeddings.
+model ProductEmbedding {
+  id             String                     @id @default(cuid())
+  productId      String                     @unique
+  product        Product                    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  embedding      Unsupported("vector(384)")
+  sourceText     String
+  embeddingModel String
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+}
+
+model Review {
+  id                 String   @id @default(cuid())
+  productId          String
+  product            Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating             Int
+  title              String
+  body               String
+  isVerifiedPurchase Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([productId, userId])
+  @@index([productId])
+}
+
+model Wishlist {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+}
+
+// ---------------------------------------------------------------------------
+// Cart / checkout / orders
+// ---------------------------------------------------------------------------
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String     @unique
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+  updatedAt DateTime   @updatedAt
+}
+
+model CartItem {
+  id                String   @id @default(cuid())
+  cartId            String
+  cart              Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity          Int
+  unitPriceSnapshot Decimal  @db.Decimal(10, 2)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([cartId, productId])
+}
+
+model Order {
+  id                      String      @id @default(cuid())
+  orderNumber             String      @unique
+  userId                  String
+  user                    User        @relation(fields: [userId], references: [id])
+  status                  OrderStatus @default(PENDING)
+  subtotal                Decimal     @db.Decimal(10, 2)
+  shippingCost            Decimal     @db.Decimal(10, 2)
+  tax                     Decimal     @db.Decimal(10, 2)
+  total                   Decimal     @db.Decimal(10, 2)
+  shippingAddressSnapshot Json
+  items                   OrderItem[]
+  placedAt                DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+model OrderItem {
+  id                  String  @id @default(cuid())
+  orderId             String
+  order               Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId           String
+  product             Product @relation(fields: [productId], references: [id])
+  productNameSnapshot String
+  unitPrice           Decimal @db.Decimal(10, 2)
+  quantity            Int
+  lineTotal           Decimal @db.Decimal(10, 2)
+}
+
+// ---------------------------------------------------------------------------
+// PC Builder Assistant
+// ---------------------------------------------------------------------------
+
+model SavedBuild {
+  id                    String      @id @default(cuid())
+  userId                String?
+  user                  User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  builderSessionToken   String?
+  name                  String
+  totalPrice            Decimal     @default(0) @db.Decimal(10, 2)
+  compatibilitySnapshot Json?
+  items                 BuildItem[]
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  @@index([userId])
+  @@index([builderSessionToken])
+}
+
+model BuildItem {
+  id          String      @id @default(cuid())
+  buildId     String
+  build       SavedBuild  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product     @relation(fields: [productId], references: [id])
+  productType ProductType
+  quantity    Int         @default(1)
+
+  @@unique([buildId, productId])
+}
+
+// ---------------------------------------------------------------------------
+// AI shopping assistant conversations
+// ---------------------------------------------------------------------------
+
+model ChatSession {
+  id           String        @id @default(cuid())
+  userId       String?
+  user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionToken String?
+  title        String?
+  messages     ChatMessage[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([userId])
+  @@index([sessionToken])
+}
+
+model ChatMessage {
+  id        String      @id @default(cuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      ChatRole
+  content   String
+  /// Retrieved source product IDs for RAG transparency, e.g. { "productIds": [...] }
+  metadata  Json?
+  createdAt DateTime    @default(now())
+
+  @@index([sessionId])
+}
